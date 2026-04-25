@@ -1,0 +1,973 @@
+import dotenv from "dotenv";
+dotenv.config();
+
+import express from "express";
+import { createServer as createViteServer } from "vite";
+import path from "path";
+import multer from "multer";
+import { GoogleGenAI } from "@google/genai";
+import { PDFParse } from "pdf-parse";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import cors from "cors";
+import mysql from "mysql2/promise";
+import fs from "fs/promises";
+import { authMiddleware, allowRoles } from "./middleware/auth";
+
+const app = express();
+const PORT = Number(process.env.PORT) || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
+
+const MYSQL_URL = process.env.MYSQL_URL || "mysql://root:XLLWnJWGtSVtzsIOMondWGmLPIEqOYXX@shuttle.proxy.rlwy.net:23244/railway";
+
+const pool = mysql.createPool({
+  uri: MYSQL_URL,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
+
+app.use(cors());
+app.use(express.json());
+
+// Set up Multer for memory storage (used for analyze)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Set up Multer for disk storage (used for permanent uploads)
+const diskStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + "-" + file.originalname);
+  }
+});
+const diskUpload = multer({ storage: diskStorage });
+
+// --- Initialize Database ---
+const initializeDB = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(255) PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        role VARCHAR(50) DEFAULT 'candidate'
+      )
+    `);
+
+    // Add role column if it doesn't exist (for existing databases)
+    try {
+      await pool.query("ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT 'candidate'");
+    } catch (e: any) {
+      // Column might already exist, ignore error ER_DUP_FIELDNAME
+      if (e.code !== 'ER_DUP_FIELDNAME') {
+        console.log("Note: role column check:", e.message);
+      }
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS resumes (
+        id VARCHAR(255) PRIMARY KEY,
+        userId VARCHAR(255) NOT NULL,
+        filename VARCHAR(255) NOT NULL,
+        uploadedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (userId) REFERENCES users(id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS analyses (
+        id VARCHAR(255) PRIMARY KEY,
+        resumeId VARCHAR(255) NOT NULL,
+        userId VARCHAR(255) NOT NULL,
+        result JSON NOT NULL,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (userId) REFERENCES users(id),
+        FOREIGN KEY (resumeId) REFERENCES resumes(id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS generated_resumes (
+        id VARCHAR(255) PRIMARY KEY,
+        userId VARCHAR(255) NOT NULL,
+        content JSON NOT NULL,
+        jobDescription TEXT,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (userId) REFERENCES users(id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        id VARCHAR(255) PRIMARY KEY,
+        recruiter_id VARCHAR(255) NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        required_skills JSON,
+        experience_required VARCHAR(255),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (recruiter_id) REFERENCES users(id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS applications (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255) NOT NULL,
+        job_id VARCHAR(255) NOT NULL,
+        resume_id VARCHAR(255) NOT NULL,
+        status VARCHAR(50) DEFAULT 'applied',
+        match_score INT DEFAULT 0,
+        applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (job_id) REFERENCES jobs(id),
+        FOREIGN KEY (resume_id) REFERENCES resumes(id)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS interviews (
+        id VARCHAR(255) PRIMARY KEY,
+        application_id VARCHAR(255) NOT NULL,
+        date DATETIME NOT NULL,
+        status VARCHAR(50) DEFAULT 'scheduled',
+        FOREIGN KEY (application_id) REFERENCES applications(id)
+      )
+    `);
+
+    try {
+      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_skills JSON");
+      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_education JSON");
+      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_experience JSON");
+      await pool.query("ALTER TABLE resumes ADD COLUMN file_path VARCHAR(255)");
+    } catch (e: any) {
+      if (e.code !== 'ER_DUP_FIELDNAME') {
+        console.log("Note: resumes columns check:", e.message);
+      }
+    }
+
+    console.log("MySQL database initialized with full ATS schema");
+  } catch (err) {
+    console.error("Database initialization failed", err);
+  }
+};
+initializeDB();
+
+// --- Auth Routes ---
+app.post("/api/auth/register", async (req, res) => {
+  const { email, password, name, role = "candidate" } = req.body;
+  if (!email || !password || !name) return res.status(400).json({ error: "Missing fields" });
+
+  try {
+    const [existing] = await pool.query<any[]>("SELECT id FROM users WHERE email = ?", [email]);
+    if (existing.length > 0) return res.status(400).json({ error: "Email already exists" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const userId = Date.now().toString();
+
+    await pool.query(
+      "INSERT INTO users (id, email, password, name, role) VALUES (?, ?, ?, ?, ?)",
+      [userId, email, hashedPassword, name, role]
+    );
+
+    const token = jwt.sign({ userId, role }, JWT_SECRET, { expiresIn: "1d" });
+    res.json({ token, user: { id: userId, email, name, role } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password, role = "candidate" } = req.body;
+  try {
+    const [users] = await pool.query<any[]>("SELECT * FROM users WHERE email = ? AND role = ?", [email, role]);
+    const user = users[0];
+
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: "1d" });
+    res.json({ token, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// authMiddleware and allowRoles are imported from ./middleware/auth
+
+app.get("/api/auth/me", authMiddleware, async (req: any, res) => {
+  try {
+    const [users] = await pool.query<any[]>("SELECT id, email, name, role FROM users WHERE id = ?", [req.userId]);
+    const user = users[0];
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ user });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// --- Google OAuth ---
+app.get("/api/auth/google/url", (req, res) => {
+  const incomingRedirectUri = req.query.redirectUri as string || (process.env.APP_URL + "/api/auth/google/callback");
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID || "",
+    redirect_uri: incomingRedirectUri,
+    response_type: "code",
+    scope: "email profile",
+    prompt: "select_account",
+    state: incomingRedirectUri // pass redirectUri in state so callback can use it
+  });
+
+  res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+});
+
+app.get("/api/auth/google/callback", async (req, res) => {
+  const { code, state } = req.query;
+  try {
+    const redirectUri = state as string || (process.env.APP_URL + "/api/auth/google/callback");
+
+    // Exchange token
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID || "",
+        client_secret: process.env.GOOGLE_CLIENT_SECRET || "",
+        code: code as string,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code"
+      })
+    });
+
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok) {
+      throw new Error("Token exchange failed: " + JSON.stringify(tokenData));
+    }
+
+    // Fetch profile
+    const userResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const userData = await userResponse.json();
+    if (!userResponse.ok) {
+      throw new Error("Userinfo fetch failed");
+    }
+
+    const { email, name, id: googleId } = userData;
+
+    // Check if user exists in DB
+    const [existing] = await pool.query<any[]>("SELECT id FROM users WHERE email = ?", [email]);
+    let userId;
+    if (existing.length === 0) {
+      userId = Date.now().toString();
+      const hashedPassword = await bcrypt.hash(Math.random().toString(36), 10);
+      await pool.query(
+        "INSERT INTO users (id, email, password, name) VALUES (?, ?, ?, ?)",
+        [userId, email, hashedPassword, name || "User"]
+      );
+    } else {
+      userId = existing[0].id;
+    }
+
+    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: "1d" });
+
+    res.send(`
+      <html>
+        <body>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: '${token}', user: { id: '${userId}', email: '${email}', name: '${(name || "User").replace(/'/g, "\\'")}' } }, '*');
+              window.close();
+            } else {
+              window.location.href = '/';
+            }
+          </script>
+          <p>Authentication successful. This window should close automatically.</p>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error("Google Auth Error", err);
+    res.send(`
+      <html>
+        <body>
+          <p>Error logging in with Google. Check server logs.</p>
+          <script>setTimeout(() => window.close(), 3000);</script>
+        </body>
+      </html>
+    `);
+  }
+});
+
+// --- ATS Engine Details ---
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+app.post("/api/analyze", authMiddleware, allowRoles("candidate"), upload.single("resume"), async (req: any, res) => {
+  try {
+    const userId = req.userId;
+    const file = req.file;
+    const jobDescription = req.body.jobDescription || "";
+
+    if (!file) return res.status(400).json({ error: "No resume file provided" });
+
+    // Parse PDF
+    let resumeText = "";
+    if (file.mimetype === "application/pdf") {
+      const parser = new PDFParse({ data: file.buffer });
+      const parseResult = await parser.getText();
+      resumeText = parseResult.text;
+      await parser.destroy();
+    } else {
+      resumeText = file.buffer.toString("utf-8");
+    }
+
+    if (!resumeText || resumeText.trim() === "") {
+      return res.status(400).json({ error: "Could not extract text from file" });
+    }
+
+    const prompt = `
+    You are an expert ATS (Applicant Tracking System) and Senior Recruiter.
+    Analyze the following resume text. If a job description is provided, score the resume against it.
+    Provide a detailed analysis output in valid JSON format ONLY, without markdown wrapping.
+
+    Schema:
+    {
+      "score": <number between 0 and 100>,
+      "keywordMatch": <number between 0 and 100>,
+      "formattingIssues": ["<issue 1>", "<issue 2>"],
+      "sectionCompleteness": ["<missing or incomplete section>", ...],
+      "skillRelevance": <number between 0 and 100>,
+      "missingKeywords": ["<keyword 1>", "<keyword 2>"],
+      "skillSuggestions": ["<suggestion 1: Add skills like X to improve match>", "<suggestion 2>", ...],
+      "suggestions": [
+        { "section": "<section>", "tip": "<improvement tip>", "example": "<better example phrasing>" }
+      ],
+      "bulletRewrites": [
+        { "original": "<original text>", "rewritten": "<better version>" }
+      ],
+      "summary": "<Short executive summary of the resume's quality>"
+    }
+
+    Specific Goal: Compare the resume's skills with the Job Description's required skills. List any missing critical skills in "missingKeywords" and provide actionable sentences in "skillSuggestions".
+
+    Job Description (if empty, assume general best practices):
+    ${jobDescription}
+
+    Resume Text:
+    ${resumeText.substring(0, 8000)} // Truncate if extremely long to avoid token limits
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    let resultText = response.text || "";
+    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+
+    if (resultText.startsWith("```json")) {
+      resultText = resultText.substring(7);
+      if (resultText.endsWith("```")) resultText = resultText.substring(0, resultText.length - 3);
+    }
+
+    // Attempt parse
+    let analysisData;
+    try {
+      analysisData = JSON.parse(resultText);
+    } catch (parseError) {
+      console.error("Failed to parse Gemini response as JSON", parseError, resultText);
+      return res.status(500).json({ error: "Invalid analysis response format. Please try again." });
+    }
+
+    // Save to DB
+    const resumeId = Date.now().toString();
+    const uploadedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query(
+      "INSERT INTO resumes (id, userId, filename, uploadedAt) VALUES (?, ?, ?, ?)",
+      [resumeId, userId, file.originalname, uploadedAt]
+    );
+
+    const analysisId = (Date.now() + 1).toString();
+    const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query(
+      "INSERT INTO analyses (id, resumeId, userId, result, createdAt) VALUES (?, ?, ?, ?, ?)",
+      [analysisId, resumeId, userId, JSON.stringify(analysisData), createdAt]
+    );
+
+    const newAnalysisDate = new Date();
+    res.json({
+      id: analysisId,
+      resumeId: resumeId,
+      userId,
+      result: analysisData,
+      createdAt: newAnalysisDate.toISOString()
+    });
+  } catch (error) {
+    console.error("Analysis Error:", error);
+    res.status(500).json({ error: "Failed to analyze resume" });
+  }
+});
+
+// Analyze a resume and return structured JSON (Skills, Education, Experience)
+app.post("/api/analyze-resume", authMiddleware, upload.single("resume"), async (req: any, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No resume file provided" });
+
+    // 1. Extract Text
+    const parser = new PDFParse({ data: req.file.buffer });
+    const parseResult = await parser.getText();
+    const resumeText = parseResult.text;
+    await parser.destroy();
+
+    // 2. AI Parsing
+    const prompt = `
+    Extract professional details from the following resume text.
+    Return ONLY valid JSON with the following structure:
+    {
+      "skills": ["<skill 1>", "<skill 2>"],
+      "education": [{"degree": "<degree>", "institution": "<institution>", "year": "<year>"}],
+      "experience": [{"title": "<title>", "company": "<company>", "duration": "<duration>"}]
+    }
+    
+    Resume Text: ${resumeText.substring(0, 8000)}
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    let resultText = response.text || "";
+    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    const parsedData = JSON.parse(resultText);
+
+    res.json(parsedData);
+  } catch (error) {
+    console.error("Analysis Error:", error);
+    res.status(500).json({ error: "Failed to analyze resume" });
+  }
+});
+
+// --- Resume Builder ---
+app.post("/api/resume/build", authMiddleware, allowRoles("candidate"), async (req: any, res) => {
+  try {
+    const userId = req.userId;
+    const { personalData, experienceData, educationData, projectsData, skillsData, jobDescription } = req.body;
+
+    const prompt = `
+    You are an expert Resume Writer and ATS Optimization Specialist.
+    Your task is to take the user's raw information and a target job description (if provided), and generate a highly polished, professional, and ATS-friendly resume.
+    
+    Guidelines:
+    1. Rewrite bullet points to use strong action verbs and highlight achievements/metrics.
+    2. Write a compelling summary matching the user's overall profile to the target job (if any).
+    3. Ensure all content is highly professional, concise, and standard for ATS parsing.
+    4. Output the exact valid JSON format below with no markdown wrapping.
+    
+    Target Job Description:
+    ${jobDescription || 'N/A'}
+
+    User Profile Data (Raw):
+    Personal: ${JSON.stringify(personalData)}
+    Experience: ${JSON.stringify(experienceData)}
+    Education: ${JSON.stringify(educationData)}
+    Projects: ${JSON.stringify(projectsData)}
+    Skills: ${JSON.stringify(skillsData)}
+    
+    JSON Schema to Output:
+    {
+      "personal": { "name": "string", "email": "string", "phone": "string", "location": "string", "linkedin": "string", "github": "string", "summary": "string" },
+      "experience": [ { "company": "string", "title": "string", "date": "string", "location": "string", "bullets": ["string"] } ],
+      "education": [ { "school": "string", "degree": "string", "date": "string", "location": "string", "details": "string" } ],
+      "projects": [ { "name": "string", "technologies": "string", "date": "string", "bullets": ["string"] } ],
+      "skills": { "languages": ["string"], "frameworks": ["string"], "tools": ["string"] }
+    }
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    let resultText = response.text || "";
+    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+
+    if (resultText.startsWith("```json")) {
+      resultText = resultText.substring(7);
+      if (resultText.endsWith("```")) resultText = resultText.substring(0, resultText.length - 3);
+    }
+
+    let resumeData;
+    try {
+      resumeData = JSON.parse(resultText);
+    } catch (parseError) {
+      console.error("Failed to parse Gemini response for Builder", parseError, resultText);
+      return res.status(500).json({ error: "Failed to generate structured resume. Try again." });
+    }
+
+    const resumeId = Date.now().toString();
+    const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query(
+      "INSERT INTO generated_resumes (id, userId, content, jobDescription, createdAt) VALUES (?, ?, ?, ?, ?)",
+      [resumeId, userId, JSON.stringify(resumeData), jobDescription || "", createdAt]
+    );
+
+    res.json({ id: resumeId, content: resumeData });
+  } catch (error) {
+    console.error("Resume Build Error:", error);
+    res.status(500).json({ error: "Failed to build resume" });
+  }
+});
+
+app.get("/api/resume/generated/:id", authMiddleware, async (req: any, res) => {
+  try {
+    const [resumes] = await pool.query<any[]>(
+      "SELECT * FROM generated_resumes WHERE id = ? AND userId = ?",
+      [req.params.id, req.userId]
+    );
+
+    if (resumes.length === 0) {
+      return res.status(404).json({ error: "Resume not found" });
+    }
+
+    const r = resumes[0];
+    const resumeData = {
+      ...r,
+      content: typeof r.content === 'string' ? JSON.parse(r.content) : r.content,
+    };
+
+    res.json(resumeData);
+  } catch (error) {
+    console.error("Error fetching generated resume:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get specific analysis by ID
+app.get("/api/analysis/:id", authMiddleware, async (req: any, res) => {
+  try {
+    const [analyses] = await pool.query<any[]>(
+      `SELECT a.*, r.filename 
+       FROM analyses a 
+       JOIN resumes r ON a.resumeId = r.id 
+       WHERE a.id = ? AND a.userId = ?`,
+      [req.params.id, req.userId]
+    );
+
+    if (analyses.length === 0) {
+      return res.status(404).json({ error: "Analysis not found" });
+    }
+
+    const a = analyses[0];
+    const analysis = {
+      ...a,
+      result: typeof a.result === 'string' ? JSON.parse(a.result) : a.result,
+      resume: {
+        id: a.resumeId,
+        filename: a.filename
+      }
+    };
+
+    res.json(analysis);
+  } catch (error) {
+    console.error("Error fetching analysis:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// --- History Route ---
+app.get("/api/history", authMiddleware, async (req: any, res) => {
+  try {
+    const [analyses] = await pool.query<any[]>(
+      `SELECT a.*, r.filename 
+       FROM analyses a 
+       JOIN resumes r ON a.resumeId = r.id 
+       WHERE a.userId = ? 
+       ORDER BY a.createdAt DESC`,
+      [req.userId]
+    );
+
+    // Format for frontend
+    const history = analyses.map(a => ({
+      ...a,
+      result: typeof a.result === 'string' ? JSON.parse(a.result) : a.result,
+      resume: {
+        id: a.resumeId,
+        filename: a.filename
+      }
+    }));
+
+    res.json({ history });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ==========================================
+// --- JOBS APIs (Recruiter Only) ---
+// ==========================================
+app.post("/api/jobs", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const { title, description, required_skills, experience_required } = req.body;
+    const jobId = Date.now().toString();
+    await pool.query(
+      "INSERT INTO jobs (id, recruiter_id, title, description, required_skills, experience_required) VALUES (?, ?, ?, ?, ?, ?)",
+      [jobId, req.userId, title, description, JSON.stringify(required_skills || []), experience_required]
+    );
+    res.json({ id: jobId, message: "Job created successfully" });
+  } catch (error) {
+    console.error("Error creating job:", error);
+    res.status(500).json({ error: "Failed to create job" });
+  }
+});
+
+app.get("/api/jobs", authMiddleware, async (req: any, res) => {
+  try {
+    // Both recruiters and candidates can see jobs
+    // Candidates see all jobs, Recruiters see their own jobs
+    let query = "SELECT * FROM jobs ORDER BY created_at DESC";
+    let params: any[] = [];
+    if (req.role === 'recruiter') {
+      query = "SELECT * FROM jobs WHERE recruiter_id = ? ORDER BY created_at DESC";
+      params = [req.userId];
+    }
+    const [jobs] = await pool.query<any[]>(query, params);
+    res.json(jobs.map(j => ({ ...j, required_skills: typeof j.required_skills === 'string' ? JSON.parse(j.required_skills) : j.required_skills })));
+  } catch (error) {
+    console.error("Error fetching jobs:", error);
+    res.status(500).json({ error: "Failed to fetch jobs" });
+  }
+});
+
+app.get("/api/jobs/:id", authMiddleware, async (req: any, res) => {
+  try {
+    const [jobs] = await pool.query<any[]>("SELECT * FROM jobs WHERE id = ?", [req.params.id]);
+    if (jobs.length === 0) return res.status(404).json({ error: "Job not found" });
+    const job = jobs[0];
+    res.json({ ...job, required_skills: typeof job.required_skills === 'string' ? JSON.parse(job.required_skills) : job.required_skills });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch job details" });
+  }
+});
+
+app.put("/api/jobs/:id", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const { title, description, required_skills, experience_required } = req.body;
+    await pool.query(
+      "UPDATE jobs SET title = ?, description = ?, required_skills = ?, experience_required = ? WHERE id = ? AND recruiter_id = ?",
+      [title, description, JSON.stringify(required_skills || []), experience_required, req.params.id, req.userId]
+    );
+    res.json({ message: "Job updated successfully" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to update job" });
+  }
+});
+
+app.get("/api/candidatesByJob", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const jobId = req.query.job_id as string;
+    if (!jobId) return res.status(400).json({ error: "Missing job_id" });
+
+    const [candidates] = await pool.query<any[]>(
+      `SELECT a.id as application_id, a.status, a.match_score, a.applied_at, 
+              u.id as user_id, u.name, u.email, 
+              r.filename as resume_filename
+       FROM applications a 
+       JOIN users u ON a.user_id = u.id 
+       JOIN resumes r ON a.resume_id = r.id
+       JOIN jobs j ON a.job_id = j.id
+       WHERE a.job_id = ? AND j.recruiter_id = ? 
+       ORDER BY a.match_score DESC`,
+      [jobId, req.userId]
+    );
+    res.json(candidates);
+  } catch (error) {
+    console.error("Error fetching ranked candidates:", error);
+    res.status(500).json({ error: "Failed to fetch ranked candidates" });
+  }
+});
+
+// Get all resumes for the current user
+app.get("/api/resumes", authMiddleware, allowRoles("candidate"), async (req: any, res) => {
+  try {
+    const [resumes] = await pool.query<any[]>(
+      "SELECT * FROM resumes WHERE userId = ? ORDER BY uploadedAt DESC",
+      [req.userId]
+    );
+    res.json({ resumes });
+  } catch (error) {
+    console.error("Error fetching resumes:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Upload a resume and store it persistently
+app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "No resume file provided" });
+
+    // 1. Extract Text for AI Parsing
+    const buffer = await fs.readFile(file.path);
+    const parser = new PDFParse({ data: buffer });
+    const parseResult = await parser.getText();
+    const resumeText = parseResult.text;
+    await parser.destroy();
+
+    // 2. AI Parsing for Structured Data
+    const prompt = `
+    Extract professional details from the following resume text.
+    Return ONLY valid JSON with the following structure:
+    {
+      "skills": ["<skill 1>", "<skill 2>"],
+      "education": [{"degree": "<degree>", "institution": "<institution>", "year": "<year>"}],
+      "experience": [{"title": "<title>", "company": "<company>", "duration": "<duration>"}]
+    }
+    
+    Resume Text: ${resumeText.substring(0, 8000)}
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    let resultText = response.text || "";
+    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    const parsedData = JSON.parse(resultText);
+
+    // 3. Save to Database
+    const resumeId = Date.now().toString();
+    const uploadedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    await pool.query(
+      "INSERT INTO resumes (id, userId, filename, file_path, uploadedAt, parsed_skills, parsed_education, parsed_experience) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        resumeId, 
+        req.userId, 
+        file.originalname, 
+        file.path, 
+        uploadedAt, 
+        JSON.stringify(parsedData.skills || []), 
+        JSON.stringify(parsedData.education || []), 
+        JSON.stringify(parsedData.experience || [])
+      ]
+    );
+
+    res.json({ resumeId, message: "Resume uploaded and parsed successfully", parsedData });
+  } catch (error) {
+    console.error("Upload & Parse Error:", error);
+    res.status(500).json({ error: "Failed to upload and parse resume" });
+  }
+});
+
+// ==========================================
+// --- APPLICATIONS APIs ---
+// ==========================================
+app.post("/api/applications", authMiddleware, allowRoles("candidate"), async (req: any, res) => {
+  try {
+    const { job_id, resume_id } = req.body;
+    
+    // 1. Get Resume and Job details
+    const [[resume]] = await pool.query<any[]>("SELECT * FROM resumes WHERE id = ? AND userId = ?", [resume_id, req.userId]);
+    const [[job]] = await pool.query<any[]>("SELECT * FROM jobs WHERE id = ?", [job_id]);
+
+    if (!resume) return res.status(404).json({ error: "Resume not found" });
+    if (!job) return res.status(404).json({ error: "Job not found" });
+
+    // 2. Parse Resume
+    let resumeText = "";
+    if (resume.file_path) {
+      const buffer = await fs.readFile(resume.file_path);
+      const parser = new PDFParse({ data: buffer });
+      const parseResult = await parser.getText();
+      resumeText = parseResult.text;
+      await parser.destroy();
+    }
+
+    if (!resumeText) return res.status(400).json({ error: "Could not extract text from stored resume" });
+
+    // 3 & 4. AI Match Score Calculation
+    const prompt = `
+    Analyze the following resume against the job description and provide a match score.
+    Provide the output in valid JSON format ONLY.
+    
+    Schema:
+    {
+      "score": <number between 0 and 100>,
+      "reasoning": "<short explanation of the score>"
+    }
+
+    Job Title: ${job.title}
+    Job Description: ${job.description}
+
+    Resume Text: ${resumeText.substring(0, 8000)}
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    let resultText = response.text || "";
+    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    const result = JSON.parse(resultText);
+    const matchScore = result.score || 0;
+
+    // 5 & 6. Save application
+    const applicationId = Date.now().toString();
+    await pool.query(
+      "INSERT INTO applications (id, user_id, job_id, resume_id, match_score, status) VALUES (?, ?, ?, ?, ?, ?)",
+      [applicationId, req.userId, job_id, resume_id, matchScore, "applied"]
+    );
+
+    res.json({ 
+      id: applicationId, 
+      message: "Applied successfully", 
+      match_score: matchScore,
+      reasoning: result.reasoning
+    });
+  } catch (error) {
+    console.error("Error applying to job:", error);
+    res.status(500).json({ error: "Failed to apply" });
+  }
+});
+
+app.get("/api/applications", authMiddleware, async (req: any, res) => {
+  try {
+    if (req.role === 'recruiter') {
+      const [applications] = await pool.query<any[]>(
+        `SELECT a.*, j.title as job_title, u.name as candidate_name, u.email as candidate_email 
+         FROM applications a 
+         JOIN jobs j ON a.job_id = j.id 
+         JOIN users u ON a.user_id = u.id 
+         WHERE j.recruiter_id = ? ORDER BY a.applied_at DESC`,
+        [req.userId]
+      );
+      return res.json(applications);
+    } else {
+      const [applications] = await pool.query<any[]>(
+        `SELECT a.*, j.title as job_title, j.description as job_description 
+         FROM applications a 
+         JOIN jobs j ON a.job_id = j.id 
+         WHERE a.user_id = ? ORDER BY a.applied_at DESC`,
+        [req.userId]
+      );
+      return res.json(applications);
+    }
+  } catch (error) {
+    console.error("Error fetching applications:", error);
+    res.status(500).json({ error: "Failed to fetch applications" });
+  }
+});
+
+app.put("/api/applications/:id/status", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const { status } = req.body; // 'shortlisted', 'interview', 'rejected'
+    await pool.query("UPDATE applications SET status = ? WHERE id = ?", [status, req.params.id]);
+    res.json({ message: "Status updated" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to update status" });
+  }
+});
+
+// --- Recruiter Actions ---
+app.post("/api/recruiter/shortlist", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const { application_id } = req.body;
+    await pool.query("UPDATE applications SET status = 'shortlisted' WHERE id = ?", [application_id]);
+    res.json({ message: "Application shortlisted" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to shortlist application" });
+  }
+});
+
+app.post("/api/recruiter/reject", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const { application_id } = req.body;
+    await pool.query("UPDATE applications SET status = 'rejected' WHERE id = ?", [application_id]);
+    res.json({ message: "Application rejected" });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to reject application" });
+  }
+});
+
+app.post("/api/recruiter/schedule-interview", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { application_id, date } = req.body;
+    const interviewId = Date.now().toString();
+
+    // 1. Create interview record
+    await connection.query(
+      "INSERT INTO interviews (id, application_id, date) VALUES (?, ?, ?)",
+      [interviewId, application_id, new Date(date)]
+    );
+
+    // 2. Update application status
+    await connection.query(
+      "UPDATE applications SET status = 'interview' WHERE id = ?",
+      [application_id]
+    );
+
+    await connection.commit();
+    res.json({ id: interviewId, message: "Interview scheduled and status updated" });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error scheduling interview:", error);
+    res.status(500).json({ error: "Failed to schedule interview" });
+  } finally {
+    connection.release();
+  }
+});
+
+// GET interviews for the recruiter
+app.get("/api/interviews", authMiddleware, allowRoles("recruiter"), async (req: any, res) => {
+  try {
+    const [interviews] = await pool.query<any[]>(
+      `SELECT i.*, a.job_id, a.user_id, u.name as candidate_name 
+       FROM interviews i 
+       JOIN applications a ON i.application_id = a.id
+       JOIN users u ON a.user_id = u.id
+       JOIN jobs j ON a.job_id = j.id
+       WHERE j.recruiter_id = ? ORDER BY i.date ASC`,
+      [req.userId]
+    );
+    res.json(interviews);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch interviews" });
+  }
+});
+
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();
