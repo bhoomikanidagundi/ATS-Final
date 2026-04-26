@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import express from "express";
-import { createServer as createViteServer } from "vite";
+// Vite is only imported dynamically in development mode to avoid production dependency issues
 import path from "path";
 import multer from "multer";
 import { GoogleGenAI } from "@google/genai";
@@ -187,8 +187,12 @@ const initializeDB = async () => {
     }
 
     console.log("MySQL database initialized with full ATS schema");
-  } catch (err) {
-    console.error("Database initialization failed", err);
+  } catch (err: any) {
+    console.error("Database initialization failed. Check your MYSQL_URL environment variable.");
+    console.error("Error details:", err);
+    // In production, we might not want to exit immediately to allow the health check to respond
+    // but without a DB the app is useless. We'll exit after a short delay to allow logs to flush.
+    setTimeout(() => process.exit(1), 1000);
   }
 };
 initializeDB();
@@ -1085,6 +1089,7 @@ app.get("/api/interviews", authMiddleware, allowRoles("recruiter"), async (req: 
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
