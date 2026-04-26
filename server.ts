@@ -30,6 +30,9 @@ const pool = mysql.createPool({
 app.use(cors());
 app.use(express.json());
 
+// Health check endpoint for deployment platforms
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
 // Set up Multer for memory storage (used for analyze)
 const upload = multer({ storage: multer.memoryStorage() });
 
