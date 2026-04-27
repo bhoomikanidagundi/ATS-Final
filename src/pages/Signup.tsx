@@ -56,8 +56,8 @@ export default function Signup() {
     setError('');
 
     try {
-      const apiUrl ="https://ats-final-production.up.railway.app";
-      const res = await fetch("https://ats-final-production.up.railway.app/api/auth/register", {
+      const apiUrl = import.meta.env.VITE_APP_URL || '';
+      const res = await fetch(`${apiUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, email, password, role }),
