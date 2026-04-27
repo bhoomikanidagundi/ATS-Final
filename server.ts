@@ -385,7 +385,7 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const genAI = new GoogleGenAI(process.env.GEMINI_API_KEY || "");
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
@@ -455,12 +455,11 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     ${resumeText.substring(0, 8000)}
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: prompt,
-    });
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
 
-    let resultText = response.text || "";
+    let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
 
     if (resultText.startsWith("```json")) {
