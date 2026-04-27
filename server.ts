@@ -48,6 +48,12 @@ const diskStorage = multer.diskStorage({
 });
 const diskUpload = multer({ storage: diskStorage });
 
+// Ensure uploads directory exists
+import { existsSync, mkdirSync } from "fs";
+if (!existsSync("uploads")) {
+  mkdirSync("uploads");
+}
+
 // Helper to extract text from PDF buffer
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
@@ -420,7 +426,7 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     `;
 
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-1.5-flash",
       contents: prompt,
     });
 
@@ -1105,6 +1111,15 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  // Global error handler to ensure JSON responses
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error("Global Error:", err);
+    res.status(err.status || 500).json({ 
+      error: "Internal Server Error", 
+      message: err.message || "An unexpected error occurred" 
+    });
   });
 }
 
