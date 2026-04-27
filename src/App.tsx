@@ -12,7 +12,7 @@ import Landing from './pages/Landing';
 import Login from './pages/Login';
 import Signup from './pages/Signup';
 import Dashboard from './pages/Dashboard';
-import Upload from './pages/Upload';
+import Analyzer from './pages/Analyzer';
 import Result from './pages/Result';
 import History from './pages/History';
 import Builder from './pages/Builder';
@@ -47,7 +47,7 @@ export default function App() {
           {/* Candidate Routes */}
           <Route element={<ProtectedRoute allowedRole="candidate"><DashboardLayout /></ProtectedRoute>}>
             <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/upload" element={<Upload />} />
+            <Route path="/upload" element={<Analyzer />} />
             <Route path="/history" element={<History />} />
             <Route path="/result/:id" element={<Result />} />
             <Route path="/builder" element={<Builder />} />
