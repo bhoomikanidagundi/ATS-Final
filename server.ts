@@ -385,7 +385,7 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const apiKey = process.env.GEMINI_API_KEY || process.env.gemi_Aoi_key || process.env.GOOGLE_API_KEY || "";
+const apiKey = (process.env.GEMINI_API_KEY || process.env.gemi_Aoi_key || process.env.GOOGLE_API_KEY || "").trim();
 if (!apiKey) {
   console.warn("CRITICAL: GEMINI_API_KEY (or gemi_Aoi_key) is missing from environment variables!");
 }
