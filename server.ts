@@ -14,7 +14,7 @@ import mysql from "mysql2/promise";
 import fs from "fs/promises";
 import { authMiddleware, allowRoles } from "./middleware/auth.ts";
 
-const app = express();
+export const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
 
@@ -1108,4 +1108,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
