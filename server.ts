@@ -32,7 +32,7 @@ app.use(cors());
 app.use(express.json());
 
 // Health check endpoint for deployment platforms
-app.get("/health", (req, res) => res.status(200).send("OK"));
+app.get("/health", (req, res) => res.status(200).send("OK - Version 2.0 (With Key Check)"));
 
 // Set up Multer for memory storage (used for analyze)
 const upload = multer({ storage: multer.memoryStorage() });
