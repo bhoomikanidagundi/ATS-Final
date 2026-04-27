@@ -6,7 +6,7 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import pdf from "pdf-parse";
+import pdf from "pdf-parse/lib/pdf-parse.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -19,7 +19,11 @@ const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
 
-const MYSQL_URL = process.env.MYSQL_URL || "mysql://root:XLLWnJWGtSVtzsIOMondWGmLPIEqOYXX@shuttle.proxy.rlwy.net:23244/railway";
+const MYSQL_URL = process.env.MYSQL_URL;
+
+if (!MYSQL_URL) {
+  console.error("CRITICAL: MYSQL_URL is missing!");
+}
 
 const pool = mysql.createPool({
   uri: MYSQL_URL,
