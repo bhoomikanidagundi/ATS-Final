@@ -385,7 +385,10 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+if (!process.env.GEMINI_API_KEY) {
+  console.warn("CRITICAL: GEMINI_API_KEY is missing from environment variables!");
+}
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "missing-key");
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
@@ -461,7 +464,10 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
 
     for (const modelName of modelsToTry) {
       try {
-        const model = genAI.getGenerativeModel({ model: modelName });
+        const model = genAI.getGenerativeModel(
+          { model: modelName },
+          { apiVersion: "v1" }
+        );
         const result = await model.generateContent(prompt);
         response = await result.response;
         if (response) break;
@@ -559,10 +565,12 @@ app.post("/api/analyze-resume", authMiddleware, upload.single("resume"), async (
     Resume Text: ${resumeText.substring(0, 8000)}
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-    });
+    const model = genAI.getGenerativeModel(
+      { model: "gemini-1.5-flash" },
+      { apiVersion: "v1" }
+    );
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
 
     let resultText = response.text || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
