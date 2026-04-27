@@ -455,12 +455,26 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     ${resumeText.substring(0, 8000)}
     `;
 
-    const model = genAI.getGenerativeModel(
-      { model: "gemini-1.5-flash" },
-      { apiVersion: "v1" }
-    );
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
+    const modelsToTry = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "gemini-1.5-pro"];
+    let response;
+    let lastError: any = null;
+
+    for (const modelName of modelsToTry) {
+      try {
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        response = await result.response;
+        if (response) break;
+      } catch (e: any) {
+        lastError = e;
+        console.error(`Model ${modelName} failed:`, e.message);
+      }
+    }
+
+    if (!response) {
+      throw new Error(`All Gemini models failed. Last error: ${lastError?.message || "Unknown error"}`);
+    }
+
     let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
 
