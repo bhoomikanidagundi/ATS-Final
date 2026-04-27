@@ -6,7 +6,7 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import pdf from "pdf-parse/lib/pdf-parse.js";
+import pdf from "pdf-parse";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
