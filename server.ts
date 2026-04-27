@@ -385,10 +385,11 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-if (!process.env.GEMINI_API_KEY) {
-  console.warn("CRITICAL: GEMINI_API_KEY is missing from environment variables!");
+const apiKey = process.env.GEMINI_API_KEY || process.env.gemi_Aoi_key || process.env.GOOGLE_API_KEY || "";
+if (!apiKey) {
+  console.warn("CRITICAL: GEMINI_API_KEY (or gemi_Aoi_key) is missing from environment variables!");
 }
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "missing-key");
+const genAI = new GoogleGenerativeAI(apiKey || "missing-key");
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
