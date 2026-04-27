@@ -1076,7 +1076,7 @@ app.get("/api/interviews", authMiddleware, allowRoles("recruiter"), async (req: 
 });
 
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV === "development") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
