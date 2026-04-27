@@ -95,10 +95,40 @@ const initializeDB = async () => {
         id VARCHAR(255) PRIMARY KEY,
         userId VARCHAR(255) NOT NULL,
         filename VARCHAR(255) NOT NULL,
+        file_path VARCHAR(255),
         uploadedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        parsed_skills JSON,
+        parsed_education JSON,
+        parsed_experience JSON,
+        current_location VARCHAR(255),
+        notice_period VARCHAR(255),
+        total_experience VARCHAR(255),
+        current_salary VARCHAR(255),
         FOREIGN KEY (userId) REFERENCES users(id)
       )
     `);
+
+    // Add missing columns to resumes table if they don't exist
+    const resumeColumns = [
+      ["file_path", "VARCHAR(255)"],
+      ["parsed_skills", "JSON"],
+      ["parsed_education", "JSON"],
+      ["parsed_experience", "JSON"],
+      ["current_location", "VARCHAR(255)"],
+      ["notice_period", "VARCHAR(255)"],
+      ["total_experience", "VARCHAR(255)"],
+      ["current_salary", "VARCHAR(255)"]
+    ];
+
+    for (const [colName, colType] of resumeColumns) {
+      try {
+        await pool.query(`ALTER TABLE resumes ADD COLUMN ${colName} ${colType}`);
+      } catch (e: any) {
+        if (e.code !== 'ER_DUP_FIELDNAME') {
+          console.log(`Note: resumes.${colName} column check:`, e.message);
+        }
+      }
+    }
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS analyses (
