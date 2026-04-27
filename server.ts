@@ -419,26 +419,30 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     `;
 
     const modelsToTry = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "gemini-1.5-pro"];
+    const versionsToTry = ["v1", "v1beta"];
     let response;
     let lastError: any = null;
 
-    for (const modelName of modelsToTry) {
-      try {
-        const model = genAI.getGenerativeModel(
-          { model: modelName },
-          { apiVersion: "v1" }
-        );
-        const result = await model.generateContent(prompt);
-        response = await result.response;
-        if (response) break;
-      } catch (e: any) {
-        lastError = e;
-        console.error(`Model ${modelName} failed:`, e.message);
+    outerLoop: for (const ver of versionsToTry) {
+      for (const modelName of modelsToTry) {
+        try {
+          const model = genAI.getGenerativeModel(
+            { model: modelName },
+            { apiVersion: ver as any }
+          );
+          const result = await model.generateContent(prompt);
+          response = await result.response;
+          if (response) break outerLoop;
+        } catch (e: any) {
+          lastError = e;
+          console.error(`Model ${modelName} (${ver}) failed:`, e.message);
+        }
       }
     }
 
     if (!response) {
-      throw new Error(`All Gemini models failed. Last error: ${lastError?.message || "Unknown error"}`);
+      const keySnippet = apiKey ? `${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}` : "MISSING";
+      throw new Error(`All models failed. Key: ${keySnippet}. Error: ${lastError?.message || "Unknown error"}`);
     }
 
     let resultText = response.text() || "";
