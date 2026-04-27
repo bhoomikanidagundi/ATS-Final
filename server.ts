@@ -5,7 +5,7 @@ import express from "express";
 // Vite is only imported dynamically in development mode to avoid production dependency issues
 import path from "path";
 import multer from "multer";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { PDFParse } from "pdf-parse";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -385,10 +385,7 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const ai = new GoogleGenAI({ 
-  apiKey: process.env.GEMINI_API_KEY || "",
-  apiVersion: "v1"
-});
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
@@ -458,15 +455,10 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     ${resumeText.substring(0, 8000)}
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-    });
-
-    let resultText = "";
-    if (response.candidates && response.candidates[0] && response.candidates[0].content) {
-      resultText = response.candidates[0].content.parts[0].text || "";
-    }
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
 
     if (resultText.startsWith("```json")) {
