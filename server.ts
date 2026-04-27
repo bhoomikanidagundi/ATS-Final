@@ -517,9 +517,9 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
       result: analysisData,
       createdAt: newAnalysisDate.toISOString()
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Analysis Error:", error);
-    res.status(500).json({ error: "Failed to analyze resume" });
+    res.status(500).json({ error: "Failed to analyze resume", details: error.message });
   }
 });
 
