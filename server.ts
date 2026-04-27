@@ -12,6 +12,7 @@ import jwt from "jsonwebtoken";
 import cors from "cors";
 import mysql from "mysql2/promise";
 import fs from "fs/promises";
+import { existsSync, mkdirSync } from "fs";
 import { authMiddleware, allowRoles } from "./middleware/auth.ts";
 
 const app = express();
@@ -49,7 +50,6 @@ const diskStorage = multer.diskStorage({
 const diskUpload = multer({ storage: diskStorage });
 
 // Ensure uploads directory exists
-import { existsSync, mkdirSync } from "fs";
 if (!existsSync("uploads")) {
   mkdirSync("uploads");
 }
