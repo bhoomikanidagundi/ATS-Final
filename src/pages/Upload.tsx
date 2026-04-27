@@ -101,7 +101,8 @@ export default function Upload() {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Upload failed');
+        const errorMsg = data.details ? `${data.error}: ${data.details}` : (data.error || 'Upload failed');
+        throw new Error(errorMsg);
       }
 
       localStorage.removeItem('upload_jd_draft'); // Clear draft
