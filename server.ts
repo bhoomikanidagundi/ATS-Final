@@ -385,7 +385,10 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const ai = new GoogleGenAI({ 
+  apiKey: process.env.GEMINI_API_KEY || "",
+  apiVersion: "v1"
+});
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
