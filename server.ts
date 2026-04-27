@@ -942,8 +942,8 @@ app.post("/api/applications", authMiddleware, allowRoles("candidate"), async (re
     const response = await result.response;
     let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
-    const result = JSON.parse(resultText);
-    const matchScore = result.score || 0;
+    const parsedResult = JSON.parse(resultText);
+    const matchScore = parsedResult.score || 0;
 
     // 5 & 6. Save application
     const applicationId = Date.now().toString();
@@ -956,7 +956,7 @@ app.post("/api/applications", authMiddleware, allowRoles("candidate"), async (re
       id: applicationId, 
       message: "Applied successfully", 
       match_score: matchScore,
-      reasoning: result.reasoning
+      reasoning: parsedResult.reasoning
     });
   } catch (error) {
     console.error("Error applying to job:", error);
