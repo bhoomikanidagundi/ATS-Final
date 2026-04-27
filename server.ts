@@ -6,7 +6,7 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { PDFParse } from "pdf-parse";
+import pdf from "pdf-parse";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -57,10 +57,8 @@ if (!existsSync("uploads")) {
 // Helper to extract text from PDF buffer
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
-    const parser = new PDFParse({ data: buffer });
-    const result = await parser.getText();
-    await parser.destroy();
-    return result.text || "";
+    const data = await pdf(buffer);
+    return data.text || "";
   } catch (err) {
     console.error("PDF Extraction Error:", err);
     return "";
@@ -70,6 +68,7 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
 // --- Initialize Database ---
 const initializeDB = async () => {
   try {
+    // 1. Core Tables
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(255) PRIMARY KEY,
@@ -79,16 +78,6 @@ const initializeDB = async () => {
         role VARCHAR(50) DEFAULT 'candidate'
       )
     `);
-
-    // Add role column if it doesn't exist (for existing databases)
-    try {
-      await pool.query("ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT 'candidate'");
-    } catch (e: any) {
-      // Column might already exist, ignore error ER_DUP_FIELDNAME
-      if (e.code !== 'ER_DUP_FIELDNAME') {
-        console.log("Note: role column check:", e.message);
-      }
-    }
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS resumes (
@@ -108,7 +97,7 @@ const initializeDB = async () => {
       )
     `);
 
-    // Add missing columns to resumes table if they don't exist
+    // 2. Add missing columns to resumes if they don't exist
     const resumeColumns = [
       ["file_path", "VARCHAR(255)"],
       ["parsed_skills", "JSON"],
@@ -124,9 +113,7 @@ const initializeDB = async () => {
       try {
         await pool.query(`ALTER TABLE resumes ADD COLUMN ${colName} ${colType}`);
       } catch (e: any) {
-        if (e.code !== 'ER_DUP_FIELDNAME') {
-          console.log(`Note: resumes.${colName} column check:`, e.message);
-        }
+        if (e.code !== 'ER_DUP_FIELDNAME') console.log(`Note: resumes.${colName} column check:`, e.message);
       }
     }
 
@@ -161,10 +148,16 @@ const initializeDB = async () => {
         description TEXT NOT NULL,
         required_skills JSON,
         experience_required VARCHAR(255),
+        location VARCHAR(100) DEFAULT 'Remote',
+        salary VARCHAR(100),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (recruiter_id) REFERENCES users(id)
       )
     `);
+
+    // Add missing job columns
+    try { await pool.query("ALTER TABLE jobs ADD COLUMN location VARCHAR(100) DEFAULT 'Remote'"); } catch {}
+    try { await pool.query("ALTER TABLE jobs ADD COLUMN salary VARCHAR(100)"); } catch {}
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS applications (
@@ -191,43 +184,9 @@ const initializeDB = async () => {
       )
     `);
 
-    try {
-      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_skills JSON");
-      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_education JSON");
-      await pool.query("ALTER TABLE resumes ADD COLUMN parsed_experience JSON");
-      await pool.query("ALTER TABLE resumes ADD COLUMN file_path VARCHAR(255)");
-    } catch (e: any) {
-      if (e.code !== 'ER_DUP_FIELDNAME') {
-        console.log("Note: resumes columns check:", e.message);
-      }
-    }
-
-    try {
-      await pool.query("ALTER TABLE jobs ADD COLUMN location VARCHAR(100) DEFAULT 'Remote'");
-      await pool.query("ALTER TABLE jobs ADD COLUMN salary VARCHAR(100)");
-    } catch (e: any) {
-      if (e.code !== 'ER_DUP_FIELDNAME') {
-        console.log("Note: jobs columns check:", e.message);
-      }
-    }
-
-    try {
-      await pool.query("ALTER TABLE resumes ADD COLUMN current_location VARCHAR(255)");
-      await pool.query("ALTER TABLE resumes ADD COLUMN notice_period VARCHAR(100)");
-      await pool.query("ALTER TABLE resumes ADD COLUMN total_experience VARCHAR(100)");
-      await pool.query("ALTER TABLE resumes ADD COLUMN current_salary VARCHAR(100)");
-    } catch (e: any) {
-      if (e.code !== 'ER_DUP_FIELDNAME') {
-        console.log("Note: resumes extended columns check:", e.message);
-      }
-    }
-
-    console.log("MySQL database initialized with full ATS schema");
+    console.log("MySQL database initialized successfully.");
   } catch (err: any) {
-    console.error("Database initialization failed. Check your MYSQL_URL environment variable.");
-    console.error("Error details:", err);
-    // In production, we might not want to exit immediately to allow the health check to respond
-    // but without a DB the app is useless. We'll exit after a short delay to allow logs to flush.
+    console.error("Database initialization failed:", err.message);
     setTimeout(() => process.exit(1), 1000);
   }
 };
@@ -549,11 +508,8 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
 app.post("/api/analyze-resume", authMiddleware, upload.single("resume"), async (req: any, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No resume file provided" });
-
-    // 1. Extract Text
     const resumeText = await extractTextFromPDF(req.file.buffer);
 
-    // 2. AI Parsing
     const prompt = `
     Extract professional details from the following resume text.
     Return ONLY valid JSON with the following structure:
@@ -566,21 +522,13 @@ app.post("/api/analyze-resume", authMiddleware, upload.single("resume"), async (
     Resume Text: ${resumeText.substring(0, 8000)}
     `;
 
-    const model = genAI.getGenerativeModel(
-      { model: "gemini-1.5-flash" },
-      { apiVersion: "v1" }
-    );
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-
-    let resultText = response.text || "";
-    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
-    const parsedData = JSON.parse(resultText);
-
-    res.json(parsedData);
-  } catch (error) {
+    const resultText = (await result.response).text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    res.json(JSON.parse(resultText));
+  } catch (error: any) {
     console.error("Analysis Error:", error);
-    res.status(500).json({ error: "Failed to analyze resume" });
+    res.status(500).json({ error: "Failed to analyze resume", details: error.message });
   }
 });
 
@@ -592,25 +540,17 @@ app.post("/api/resume/build", authMiddleware, allowRoles("candidate"), async (re
 
     const prompt = `
     You are an expert Resume Writer and ATS Optimization Specialist.
-    Your task is to take the user's raw information and a target job description (if provided), and generate a highly polished, professional, and ATS-friendly resume.
+    Rewrite the user's data to be highly professional and ATS-friendly.
+    Output valid JSON only matching the schema below.
     
-    Guidelines:
-    1. Rewrite bullet points to use strong action verbs and highlight achievements/metrics.
-    2. Write a compelling summary matching the user's overall profile to the target job (if any).
-    3. Ensure all content is highly professional, concise, and standard for ATS parsing.
-    4. Output the exact valid JSON format below with no markdown wrapping.
-    
-    Target Job Description:
-    ${jobDescription || 'N/A'}
-
-    User Profile Data (Raw):
+    Target Job Description: ${jobDescription || 'N/A'}
     Personal: ${JSON.stringify(personalData)}
     Experience: ${JSON.stringify(experienceData)}
     Education: ${JSON.stringify(educationData)}
     Projects: ${JSON.stringify(projectsData)}
     Skills: ${JSON.stringify(skillsData)}
     
-    JSON Schema to Output:
+    JSON Schema:
     {
       "personal": { "name": "string", "email": "string", "phone": "string", "location": "string", "linkedin": "string", "github": "string", "summary": "string" },
       "experience": [ { "company": "string", "title": "string", "date": "string", "location": "string", "bullets": ["string"] } ],
@@ -620,26 +560,10 @@ app.post("/api/resume/build", authMiddleware, allowRoles("candidate"), async (re
     }
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-    });
-
-    let resultText = response.text || "";
-    resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
-
-    if (resultText.startsWith("```json")) {
-      resultText = resultText.substring(7);
-      if (resultText.endsWith("```")) resultText = resultText.substring(0, resultText.length - 3);
-    }
-
-    let resumeData;
-    try {
-      resumeData = JSON.parse(resultText);
-    } catch (parseError) {
-      console.error("Failed to parse Gemini response for Builder", parseError, resultText);
-      return res.status(500).json({ error: "Failed to generate structured resume. Try again." });
-    }
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
+    const result = await model.generateContent(prompt);
+    const resultText = (await result.response).text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    const resumeData = JSON.parse(resultText);
 
     const resumeId = Date.now().toString();
     const createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -649,9 +573,9 @@ app.post("/api/resume/build", authMiddleware, allowRoles("candidate"), async (re
     );
 
     res.json({ id: resumeId, content: resumeData });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Resume Build Error:", error);
-    res.status(500).json({ error: "Failed to build resume" });
+    res.status(500).json({ error: "Failed to build resume", details: error.message });
   }
 });
 
