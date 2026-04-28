@@ -8,8 +8,7 @@ import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const pdfParseModule = require("pdf-parse");
-const pdf = typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule.default || pdfParseModule;
+const pdf = require("pdf-parse/lib/pdf-parse.js");
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -74,19 +73,17 @@ if (!existsSync(uploadDir)) {
   mkdirSync(uploadDir);
 }
 
-// Helper to extract text from PDF buffer
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
     if (!buffer || buffer.length === 0) return "";
     if (typeof pdf !== 'function') {
-      console.error("pdf-parse is not a function. Module type:", typeof pdfParseModule);
-      return "Error: PDF parser configuration issue.";
+      throw new Error("PDF parser is not correctly initialized.");
     }
     const data = await pdf(buffer);
     return data?.text || "";
   } catch (err: any) {
     console.error("PDF Extraction Error:", err.message);
-    return "";
+    throw err;
   }
 }
 
@@ -431,7 +428,11 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     }
 
     if (!resumeText || resumeText.trim() === "") {
-      return res.status(400).json({ error: "Could not extract text from file" });
+      return res.status(400).json({ error: "Could not extract text from file. The PDF might be empty or protected." });
+    }
+    
+    if (resumeText.startsWith("Error: PDF parser")) {
+       return res.status(500).json({ error: "Server configuration error with PDF parsing." });
     }
 
     const prompt = `
