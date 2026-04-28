@@ -403,7 +403,7 @@ async function getWorkingModel(prompt: string) {
   throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
 }
 
-app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
+app.post("/api/analyze", authMiddleware, allowRoles("candidate"), upload.single("resume"), async (req: any, res) => {
   try {
     const userId = req.userId;
     const file = req.file;
@@ -411,18 +411,18 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
 
     if (!file) return res.status(400).json({ error: "No resume file provided" });
 
-    // Parse PDF
+    // Process from memory
     let resumeText = "";
     try {
-      const buffer = await fs.readFile(file.path);
-      if (file.mimetype === "application/pdf") {
+      const buffer = req.file.buffer;
+      if (req.file.mimetype === "application/pdf") {
         resumeText = await extractTextFromPDF(buffer);
       } else {
         resumeText = buffer.toString("utf-8");
       }
-    } catch (err) {
-      console.error("File Read Error:", err);
-      return res.status(500).json({ error: "Failed to read uploaded file" });
+    } catch (err: any) {
+      console.error("Extraction Error:", err.message);
+      return res.status(500).json({ error: "Failed to process resume content", details: err.message });
     }
 
     if (!resumeText || resumeText.trim() === "") {
@@ -511,6 +511,12 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     const analysisData = fullResult.analysis || fullResult; // Fallback if AI skips wrapping
     const structuredData = fullResult.structuredData || {};
 
+    // Save to disk for persistence
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const filename = uniqueSuffix + "-" + file.originalname;
+    const filePath = path.join(uploadDir, filename);
+    await fs.writeFile(filePath, file.buffer);
+
     // Save to DB
     const resumeId = Date.now().toString();
     const uploadedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -521,7 +527,7 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
         resumeId, 
         userId, 
         file.originalname, 
-        file.path, 
+        filePath, 
         uploadedAt,
         JSON.stringify(structuredData.skills || []),
         JSON.stringify(structuredData.education || []),
@@ -857,13 +863,13 @@ app.get("/api/resumes", authMiddleware, allowRoles("candidate"), async (req: any
 });
 
 // Upload a resume and store it persistently
-app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
+app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), upload.single("resume"), async (req: any, res) => {
   try {
     const file = req.file;
     if (!file) return res.status(400).json({ error: "No resume file provided" });
 
     // 1. Extract Text for AI Parsing
-    const buffer = await fs.readFile(file.path);
+    const buffer = req.file.buffer;
     const resumeText = await extractTextFromPDF(buffer);
 
     // 2. AI Parsing for Structured Data
@@ -888,7 +894,13 @@ app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), diskUplo
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
     const parsedData = JSON.parse(resultText);
 
-    // 3. Save to Database
+    // 3. Save to disk for persistence
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const filename = uniqueSuffix + "-" + file.originalname;
+    const filePath = path.join(uploadDir, filename);
+    await fs.writeFile(filePath, file.buffer);
+
+    // 4. Save to Database
     const resumeId = Date.now().toString();
     const uploadedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
@@ -898,7 +910,7 @@ app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), diskUplo
         resumeId, 
         req.userId, 
         file.originalname, 
-        file.path, 
+        filePath, 
         uploadedAt, 
         JSON.stringify(parsedData.skills || []), 
         JSON.stringify(parsedData.education || []), 
