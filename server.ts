@@ -875,9 +875,7 @@ app.post("/api/upload-resume", authMiddleware, allowRoles("candidate"), diskUplo
     Resume Text: ${resumeText.substring(0, 8000)}
     `;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
+    const response = await getWorkingModel(prompt);
     let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
     const parsedData = JSON.parse(resultText);
