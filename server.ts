@@ -6,31 +6,43 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import pdf from "pdf-parse";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const pdf = require("pdf-parse");
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
-import mysql from "mysql2/promise";
+import mysql, { Pool } from "mysql2/promise";
 import fs from "fs/promises";
 import { existsSync, mkdirSync } from "fs";
 import { authMiddleware, allowRoles } from "./middleware/auth.ts";
 
 const app = express();
-const PORT = Number(process.env.PORT) || 5000;
+const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-for-dev";
 
-const MYSQL_URL = process.env.MYSQL_URL;
+const MYSQL_URL = process.env.MYSQL_URL || process.env.DATABASE_URL || process.env.MYSQLURL || "";
 
 if (!MYSQL_URL) {
-  console.error("CRITICAL: MYSQL_URL is missing!");
+  console.warn("CRITICAL WARNING: No Database URL found in environment variables!");
 }
 
-const pool = mysql.createPool({
-  uri: MYSQL_URL,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+let pool: Pool;
+try {
+  if (!MYSQL_URL) {
+    throw new Error("MYSQL_URL is empty or undefined");
+  }
+  pool = mysql.createPool({
+    uri: MYSQL_URL,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    connectTimeout: 10000 // 10s timeout
+  });
+  console.log("Database pool created. URL structure:", MYSQL_URL.split('@')[1] || "Local/Masked");
+} catch (dbErr: any) {
+  console.error("CRITICAL: FAILED to create DB pool:", dbErr.message);
+}
 
 app.use(cors());
 app.use(express.json());
@@ -190,8 +202,8 @@ const initializeDB = async () => {
 
     console.log("MySQL database initialized successfully.");
   } catch (err: any) {
-    console.error("Database initialization failed:", err.message);
-    setTimeout(() => process.exit(1), 1000);
+    console.error("Database initialization failed but server will continue to start:", err.message);
+    // Don't exit immediately, let the server start so we can see logs/health
   }
 };
 initializeDB();
@@ -348,11 +360,44 @@ app.get("/api/auth/google/callback", async (req, res) => {
 });
 
 // --- ATS Engine Details ---
-const apiKey = (process.env.GEMINI_API_KEY || process.env.gemi_Aoi_key || process.env.GOOGLE_API_KEY || "").trim();
+const apiKey = process.env.GEMINI_API_KEY?.trim();
 if (!apiKey) {
-  console.warn("CRITICAL: GEMINI_API_KEY (or gemi_Aoi_key) is missing from environment variables!");
+  console.error("WARNING: GEMINI_API_KEY is missing. AI features will fail.");
+} else {
+  console.log("GEMINI_API_KEY detected (Length:", apiKey.length, ")");
 }
-const genAI = new GoogleGenerativeAI(apiKey || "missing-key");
+const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
+
+// Helper to get a working model (tries multiple versions)
+async function getWorkingModel(prompt: string) {
+  if (!genAI) throw new Error("Gemini AI is not configured.");
+  
+  const modelsToTry = [
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite"
+  ];
+  const versionsToTry = ["v1beta"];
+  let lastError: any = null;
+
+  for (const ver of versionsToTry) {
+    for (const modelName of modelsToTry) {
+      try {
+        const model = genAI.getGenerativeModel(
+          { model: modelName },
+          { apiVersion: ver as any }
+        );
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        if (response) return response;
+      } catch (e: any) {
+        lastError = e;
+        console.warn(`Model ${modelName} (${ver}) failed:`, e.message);
+      }
+    }
+  }
+  throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
+}
 
 app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.single("resume"), async (req: any, res) => {
   try {
@@ -422,31 +467,20 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), diskUpload.sin
     ${resumeText.substring(0, 8000)}
     `;
 
-    const modelsToTry = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "gemini-1.5-pro"];
-    const versionsToTry = ["v1", "v1beta"];
-    let response;
-    let lastError: any = null;
-
-    outerLoop: for (const ver of versionsToTry) {
-      for (const modelName of modelsToTry) {
-        try {
-          const model = genAI.getGenerativeModel(
-            { model: modelName },
-            { apiVersion: ver as any }
-          );
-          const result = await model.generateContent(prompt);
-          response = await result.response;
-          if (response) break outerLoop;
-        } catch (e: any) {
-          lastError = e;
-          console.error(`Model ${modelName} (${ver}) failed:`, e.message);
-        }
-      }
+    if (!genAI) {
+      return res.status(500).json({ error: "Gemini AI is not configured. Please check GEMINI_API_KEY." });
     }
 
-    if (!response) {
+    if (!genAI) {
+      return res.status(500).json({ error: "Gemini AI is not configured. Please check GEMINI_API_KEY." });
+    }
+
+    let response;
+    try {
+      response = await getWorkingModel(prompt);
+    } catch (e: any) {
       const keySnippet = apiKey ? `${apiKey.substring(0, 6)}...${apiKey.substring(apiKey.length - 4)}` : "MISSING";
-      throw new Error(`All models failed. Key: ${keySnippet}. Error: ${lastError?.message || "Unknown error"}`);
+      throw new Error(`${e.message}. Key: ${keySnippet}`);
     }
 
     let resultText = response.text() || "";
@@ -530,9 +564,11 @@ app.post("/api/analyze-resume", authMiddleware, upload.single("resume"), async (
     Resume Text: ${resumeText.substring(0, 8000)}
     `;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
-    const result = await model.generateContent(prompt);
-    const resultText = (await result.response).text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    if (!genAI) {
+      return res.status(500).json({ error: "Gemini AI is not configured. Please check GEMINI_API_KEY." });
+    }
+    const response = await getWorkingModel(prompt);
+    const resultText = response.text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
     res.json(JSON.parse(resultText));
   } catch (error: any) {
     console.error("Analysis Error:", error);
@@ -568,9 +604,11 @@ app.post("/api/resume/build", authMiddleware, allowRoles("candidate"), async (re
     }
     `;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
-    const result = await model.generateContent(prompt);
-    const resultText = (await result.response).text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
+    if (!genAI) {
+      return res.status(500).json({ error: "Gemini AI is not configured. Please check GEMINI_API_KEY." });
+    }
+    const response = await getWorkingModel(prompt);
+    const resultText = response.text().replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
     const resumeData = JSON.parse(resultText);
 
     const resumeId = Date.now().toString();
@@ -941,9 +979,10 @@ app.post("/api/applications", authMiddleware, allowRoles("candidate"), async (re
     Resume Text: ${resumeText.substring(0, 8000)}
     `;
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" }, { apiVersion: "v1" });
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
+    if (!genAI) {
+      return res.status(500).json({ error: "Gemini AI is not configured. Please check GEMINI_API_KEY." });
+    }
+    const response = await getWorkingModel(prompt);
     let resultText = response.text() || "";
     resultText = resultText.replace(/```json\n/g, "").replace(/```\n?/g, "").trim();
     const parsedResult = JSON.parse(resultText);

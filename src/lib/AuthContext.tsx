@@ -28,10 +28,35 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const storedToken = localStorage.getItem('token');
     const storedUser = localStorage.getItem('user');
     if (storedToken && storedUser) {
-      setToken(storedToken);
-      setUser(JSON.parse(storedUser));
+      // Validate token against the server before trusting it
+      const apiUrl = import.meta.env.VITE_APP_URL || '';
+      fetch(`${apiUrl}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${storedToken}` }
+      })
+        .then(res => {
+          if (res.ok) {
+            return res.json().then(data => {
+              setToken(storedToken);
+              setUser(data.user);
+              // Update stored user with fresh server data
+              localStorage.setItem('user', JSON.stringify(data.user));
+            });
+          } else {
+            // Token is invalid/expired — clear stale auth
+            console.warn('Stored token is invalid, clearing session.');
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+          }
+        })
+        .catch(() => {
+          // Network error — use cached data for offline fallback
+          setToken(storedToken);
+          setUser(JSON.parse(storedUser));
+        })
+        .finally(() => setIsLoading(false));
+    } else {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   }, []);
 
   const login = (newToken: string, newUser: User) => {
