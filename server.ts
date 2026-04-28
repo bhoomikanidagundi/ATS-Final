@@ -8,7 +8,8 @@ import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const pdf = require("pdf-parse");
+const pdfParseModule = require("pdf-parse");
+const pdf = typeof pdfParseModule === 'function' ? pdfParseModule : pdfParseModule.default || pdfParseModule;
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -56,7 +57,9 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Set up Multer for disk storage (used for permanent uploads)
 const diskStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, "uploads/");
+    const uploadDir = path.join(process.cwd(), "uploads");
+    if (!existsSync(uploadDir)) mkdirSync(uploadDir);
+    cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
@@ -66,17 +69,23 @@ const diskStorage = multer.diskStorage({
 const diskUpload = multer({ storage: diskStorage });
 
 // Ensure uploads directory exists
-if (!existsSync("uploads")) {
-  mkdirSync("uploads");
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!existsSync(uploadDir)) {
+  mkdirSync(uploadDir);
 }
 
 // Helper to extract text from PDF buffer
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
+    if (!buffer || buffer.length === 0) return "";
+    if (typeof pdf !== 'function') {
+      console.error("pdf-parse is not a function. Module type:", typeof pdfParseModule);
+      return "Error: PDF parser configuration issue.";
+    }
     const data = await pdf(buffer);
-    return data.text || "";
-  } catch (err) {
-    console.error("PDF Extraction Error:", err);
+    return data?.text || "";
+  } catch (err: any) {
+    console.error("PDF Extraction Error:", err.message);
     return "";
   }
 }
