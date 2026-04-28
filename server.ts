@@ -396,21 +396,28 @@ async function getWorkingModel(prompt: string) {
   for (const ver of versionsToTry) {
     for (const modelName of modelsToTry) {
       try {
-        // Add a small delay between models to avoid hitting RPM limits
-        if (modelName !== modelsToTry[0]) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-        
+        console.log(`Trying model: ${modelName} (${ver})...`);
         const model = genAI.getGenerativeModel(
-          { model: modelName },
+          { 
+            model: modelName,
+            safetySettings: [
+              { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+            ]
+          },
           { apiVersion: ver as any }
         );
         const result = await model.generateContent(prompt);
         const response = await result.response;
-        if (response) return response;
-      } catch (e: any) {
-        lastError = e;
-        console.warn(`Model ${modelName} (${ver}) failed:`, e.message);
+        return response.text();
+      } catch (err: any) {
+        lastError = err;
+        console.log(`Model ${modelName} (${ver}) failed: ${err.message}`);
+        // Wait a bit before trying the next model
+        await new Promise(resolve => setTimeout(resolve, 500));
+        continue;
       }
     }
   }
