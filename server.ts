@@ -77,8 +77,10 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
     if (typeof PDFParse !== 'function') {
       throw new Error("PDF parser is not correctly initialized.");
     }
-    const data = await PDFParse(buffer);
-    return data?.text || "";
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    await parser.destroy();
+    return result?.text || "";
   } catch (err: any) {
     console.error("PDF Extraction Error:", err.message);
     throw err;
