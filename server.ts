@@ -6,7 +6,10 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { PDFParse } from "pdf-parse";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const pdfModule = require("pdf-parse");
+const PDFParse = pdfModule.PDFParse;
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -79,7 +82,6 @@ async function extractTextFromPDF(buffer: Buffer): Promise<string> {
     }
     const parser = new PDFParse({ data: buffer });
     const result = await parser.getText();
-    await parser.destroy();
     return result?.text || "";
   } catch (err: any) {
     console.error("PDF Extraction Error:", err.message);
@@ -379,16 +381,25 @@ async function getWorkingModel(prompt: string) {
   if (!genAI) throw new Error("Gemini AI is not configured.");
   
   const modelsToTry = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash-exp",
     "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash-lite"
+    "gemini-2.0-flash-lite",
+    "gemini-pro"
   ];
-  const versionsToTry = ["v1beta"];
+  const versionsToTry = ["v1beta", "v1"];
   let lastError: any = null;
 
   for (const ver of versionsToTry) {
     for (const modelName of modelsToTry) {
       try {
+        // Add a small delay between models to avoid hitting RPM limits
+        if (modelName !== modelsToTry[0]) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
         const model = genAI.getGenerativeModel(
           { model: modelName },
           { apiVersion: ver as any }
@@ -975,10 +986,12 @@ app.post("/api/applications", authMiddleware, allowRoles("candidate"), async (re
       const missingSkills = requiredSkills.filter((skill: string) => !resumeTextLower.includes(skill.toLowerCase()));
       
       if (missingSkills.length > 0) {
-        return res.status(400).json({ 
-          error: "Mandatory Keywords Missing", 
-          details: `Your resume does not contain the required skills for this role: ${missingSkills.join(', ')}` 
-        });
+        console.warn(`[Apply] Missing skills detected: ${missingSkills.join(', ')}`);
+        // We still allow application but with a warning or low score later
+        // return res.status(400).json({ 
+        //   error: "Mandatory Keywords Missing", 
+        //   details: `Your resume does not contain the required skills for this role: ${missingSkills.join(', ')}` 
+        // });
       }
     }
 
