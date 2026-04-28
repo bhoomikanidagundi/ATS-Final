@@ -8,8 +8,14 @@ import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const pdfModule = require("pdf-parse");
-const PDFParse = pdfModule.PDFParse;
+let pdfModule: any;
+try {
+  pdfModule = require("pdf-parse");
+} catch (e) {
+  console.error("Failed to require pdf-parse, trying import...");
+}
+
+const PDFParse = pdfModule?.PDFParse || pdfModule?.default?.PDFParse;
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -442,8 +448,8 @@ app.post("/api/analyze", authMiddleware, allowRoles("candidate"), upload.single(
         resumeText = buffer.toString("utf-8");
       }
     } catch (err: any) {
-      console.error("Extraction Error:", err.message);
-      return res.status(500).json({ error: "Failed to process resume content", details: err.message });
+      console.error("PDF Extraction Error:", err);
+      return res.status(500).json({ error: `Failed to read uploaded file: ${err.message}` });
     }
 
     if (!resumeText || resumeText.trim() === "") {
