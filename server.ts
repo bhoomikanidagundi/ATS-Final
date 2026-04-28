@@ -6,7 +6,7 @@ import express from "express";
 import path from "path";
 import multer from "multer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import pdf from "pdf-parse";
+import { PDFParse } from "pdf-parse";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
@@ -74,10 +74,10 @@ if (!existsSync(uploadDir)) {
 async function extractTextFromPDF(buffer: Buffer): Promise<string> {
   try {
     if (!buffer || buffer.length === 0) return "";
-    if (typeof pdf !== 'function') {
+    if (typeof PDFParse !== 'function') {
       throw new Error("PDF parser is not correctly initialized.");
     }
-    const data = await pdf(buffer);
+    const data = await PDFParse(buffer);
     return data?.text || "";
   } catch (err: any) {
     console.error("PDF Extraction Error:", err.message);
